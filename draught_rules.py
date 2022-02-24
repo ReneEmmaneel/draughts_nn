@@ -2,7 +2,7 @@
 
 import torch
 
-from utils import Pieces
+from utils import *
 
 def possible_moves(board_state, is_white):
     """Given a board_state, find all possible moves and return
@@ -15,7 +15,34 @@ def possible_moves(board_state, is_white):
     output:
         possible_moves: list of (move_name, new_board_state) tuples
     """
-    pass
+    possible_moves = []
+    def add_move(move):
+        new = board_state.detach().clone()
+        new[h][w][Pieces.WHITE_PIECE.value] = 0
+        new[h][w][Pieces.EMPTY.value] = 1
+        new[move[0]][move[1]][Pieces.EMPTY.value] = 0
+        new[move[0]][move[1]][Pieces.WHITE_PIECE.value] = 1
+        notation = notation_move(h, w, move[0], move[1])
+        possible_moves.append((notation, board_state))
+    #Check captures
+
+    #Check normal moves
+    for h, row in enumerate(board_state):
+        right = h % 2 == 0
+        for w, tile in enumerate(row):
+            if is_white:
+                if h > 0:
+                    #Check moves for normal pieces
+                    if tile[Pieces.WHITE_PIECE.value] == 1:
+                        move_left = (h-1, w - int(not right))
+                        move_right = (h-1, w - int(not right) + 1)
+
+                        for move in [move_left, move_right]:
+                            if move[0] in range(10) and move[1] in range(5):
+                                if board_state[move[0]][move[1]][Pieces.EMPTY.value]:
+                                    add_move(move)
+    return possible_moves
+
 
 def print_position(board_state, is_white):
     print('==={} to move==='.format('white' if is_white else 'black'))
@@ -62,4 +89,6 @@ def load_position(FEN="W:W31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,
     return (board_state, is_white)
 
 if __name__ == "__main__":
-    print_position(*load_position())
+    position = load_position()
+    print_position(*position)
+    print([_[0] for _ in possible_moves(*position)])
