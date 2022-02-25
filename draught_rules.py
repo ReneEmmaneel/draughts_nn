@@ -16,31 +16,63 @@ def possible_moves(board_state, is_white):
         possible_moves: list of (move_name, new_board_state) tuples
     """
     possible_moves = []
-    def add_move(move):
+    def add_move(move, new_piece):
         new = board_state.detach().clone()
-        new[h][w][Pieces.WHITE_PIECE.value] = 0
+        new[h][w][new_piece.value] = 0
         new[h][w][Pieces.EMPTY.value] = 1
         new[move[0]][move[1]][Pieces.EMPTY.value] = 0
-        new[move[0]][move[1]][Pieces.WHITE_PIECE.value] = 1
+        new[move[0]][move[1]][new_piece.value] = 1
         notation = notation_move(h, w, move[0], move[1])
         possible_moves.append((notation, board_state))
     #Check captures
+    for h, row in enumerate(board_state):
+        right = h % 2 == 0
+        for w, tile in enumerate(row):
+            #Check normal piece capture
+            pass
 
     #Check normal moves
     for h, row in enumerate(board_state):
         right = h % 2 == 0
         for w, tile in enumerate(row):
-            if is_white:
-                if h > 0:
-                    #Check moves for normal pieces
-                    if tile[Pieces.WHITE_PIECE.value] == 1:
-                        move_left = (h-1, w - int(not right))
-                        move_right = (h-1, w - int(not right) + 1)
+            #Check normal move
+            piece = Pieces.WHITE_PIECE if is_white else Pieces.BLACK_PIECE
+            new_h = h-1 if is_white else h+1
+            if tile[piece.value] == 1:
+                move_left = (new_h, w - int(not right))
+                move_right = (new_h, w - int(not right) + 1)
 
-                        for move in [move_left, move_right]:
+                for move in [move_left, move_right]:
+                    if move[0] in range(10) and move[1] in range(5):
+                        if board_state[move[0]][move[1]][Pieces.EMPTY.value]:
+                            add_move(move, piece)
+
+            #Check king move
+            piece = Pieces.WHITE_KING if is_white else Pieces.BLACK_KING
+            if tile[piece.value] == 1:
+                new_h_up = h
+                new_h_down = h
+                new_w_left = w
+                new_w_right = w
+
+                moves_still_possible = [True, True, True, True]
+                for _ in range(1,10):
+                    new_h_up = new_h_up - 1
+                    new_h_down = new_h_down + 1
+                    new_w_left = new_w_left - int(new_h_up % 2 == 0)
+                    new_w_right = new_w_right - int(new_h_up % 2 == 0) + 1
+                    all_moves = [(new_h_up, new_w_left), (new_h_up, new_w_right),
+                                 (new_h_down, new_w_left), (new_h_down, new_w_right)]
+
+                    for move_num, move in enumerate(all_moves):
+                        if moves_still_possible[move_num]:
                             if move[0] in range(10) and move[1] in range(5):
                                 if board_state[move[0]][move[1]][Pieces.EMPTY.value]:
-                                    add_move(move)
+                                    add_move(move, piece)
+                                else:
+                                    moves_still_possible[move_num] = False
+                            else:
+                                moves_still_possible[move_num] = False
     return possible_moves
 
 
