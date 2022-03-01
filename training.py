@@ -15,43 +15,58 @@ class PositionEvaluator(nn.Module):
         self.c_hidden = 10
 
         self.input = nn.Sequential(
-            nn.Conv2d(5, self.c_hidden, kernel_size=1, bias=True),
+            nn.Conv2d(6, self.c_hidden, kernel_size=1, bias=True),
             nn.BatchNorm2d(self.c_hidden),
             nn.Tanh(),
-            nn.Conv2d(self.c_hidden, self.c_hidden, stride=(1,2), kernel_size=3, bias=True),
-            nn.BatchNorm2d(self.c_hidden),
+            nn.Conv2d(self.c_hidden, self.c_hidden*2, stride=(2,1), kernel_size=3, bias=True),
+            nn.BatchNorm2d(self.c_hidden*2),
             nn.Tanh(),
-            nn.Conv2d(self.c_hidden, self.c_hidden, stride=1, kernel_size=(3,4), bias=True),
-            nn.BatchNorm2d(self.c_hidden),
+            nn.Conv2d(self.c_hidden*2, self.c_hidden*5, stride=1, kernel_size=(4,3), bias=True),
+            nn.BatchNorm2d(self.c_hidden*5),
             nn.Tanh()
         )
 
-        self.fully_connected = nn.Sequential(
-            nn.Linear(self.c_hidden + 1,1),
+        self.value_head = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(self.c_hidden*5,1),
             nn.Tanh()
+        )
+
+        self.policy_head = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(self.c_hidden*5,50*50),
+            nn.ReLU()
         )
 
     def forward(self, board_state, is_white):
-        board_state = board_state.permute(0,2,3,1)
+        """Given a [B,H,W,P] board_state and [B] is_white
+        return [B] value score and [B,H,W,H,W] policy head
+        """
+        W = 5
+        H = 10
+
+        is_white = is_white.squeeze().repeat(50).reshape(-1,H,W,1)
+        board_state = torch.cat((board_state, is_white), dim=3)
+
+        board_state = board_state.permute(0,3,1,2)
         board_state = self.input(board_state)
-        board_state = board_state.reshape(-1, self.c_hidden)
-        board_state = torch.cat((board_state, is_white), dim=1)
 
-        value = self.fully_connected(board_state).reshape(-1)
+        policy = self.policy_head(board_state).reshape(-1,H,W,H,W)
+        value = self.value_head(board_state).reshape(-1)
 
-        return value
+        return value, policy
 
     @property
     def device(self):
         return next(self.parameters()).device
 
-def self_play_and_dataset(run_folder, n=5):
+def self_play_and_dataset(run_folder, model, n=5):
     """Self play and create new dataset
     input:
         run_folder - str with path to folder to save previous states
         n - how many previous saved states to add to newly generated states
     """
-    all_new_states = play_games(k=3)
+    all_new_states = play_games(model, k=3)
     previous_states = all_new_states
     saved_positions_folder = f'{run_folder}/saved_positions'
 
@@ -78,7 +93,7 @@ def self_play_and_dataset(run_folder, n=5):
     return dataloader
 
 @torch.no_grad()
-def test_model(model, data_loader):
+def test_model(model, data_loader, beta=1):
     """
     Function for testing a model on a dataset.
     Inputs:
@@ -87,26 +102,44 @@ def test_model(model, data_loader):
     Outputs:
         average_loss - Average loss
     """
-    total_loss = 0.
+    total_loss, total_policy_loss, total_value_loss = 0., 0., 0.
     num_samples = 0
-    loss_fn = nn.MSELoss()
+
+    value_loss_fn = nn.MSELoss()
+    policy_loss_fn = nn.BCELoss()
     for batch_ndx, sample in enumerate(data_loader):
         model.eval()
-        board_state, is_white, outcome = sample[0].to(model.device), sample[1].to(model.device), sample[2].to(model.device)
-        with torch.no_grad():
-            prediction = model(board_state, is_white)
-        loss = loss_fn(prediction, outcome)
+
+        board_state          = sample[0].to(model.device)
+        is_white             = sample[1].to(model.device)
+        outcome              = sample[2].to(model.device)
+        search_probabilities = sample[3].to(model.device)
 
         batch_size = len(sample[0])
 
+        with torch.no_grad():
+            value, policy = model(board_state, is_white)
+
+        value_loss = value_loss_fn(value, outcome.float())
+
+        policy = torch.softmax(policy.view(batch_size, -1), axis=1)
+        search_probabilities = torch.softmax(search_probabilities.view(batch_size, -1), axis=1)
+
+        policy_loss = policy_loss_fn(policy, search_probabilities.detach())
+        loss = value_loss + beta * policy_loss
+
         total_loss += loss * batch_size
+        total_policy_loss += policy_loss * batch_size
+        total_value_loss += value_loss * batch_size
 
         num_samples += batch_size
 
     average_loss = total_loss / num_samples
-    return average_loss
+    average_value_loss = total_policy_loss / num_samples
+    average_policy_loss = total_value_loss / num_samples
+    return average_loss, average_value_loss, average_policy_loss
 
-def train_evaluator(model, data_loader, optimizer):
+def train_evaluator(model, data_loader, optimizer, beta=1):
     """
     Function for training a model on a dataset. Train the model for one epoch.
     Inputs:
@@ -120,25 +153,50 @@ def train_evaluator(model, data_loader, optimizer):
     total_loss = 0.
     num_samples = 0
 
-    loss_fn = nn.MSELoss()
+    value_loss_fn = nn.MSELoss()
+    policy_loss_fn = nn.BCELoss()
     for batch_ndx, sample in enumerate(data_loader):
         model.train()
-        board_state, is_white, outcome = sample[0].to(model.device), sample[1].to(model.device), sample[2].to(model.device).float()
+        board_state          = sample[0].to(model.device)
+        is_white             = sample[1].to(model.device)
+        outcome              = sample[2].to(model.device)
+        search_probabilities = sample[3].to(model.device)
+
+        batch_size = len(sample[0])
 
         optimizer.zero_grad()
-        prediction = model(board_state, is_white)
-        loss = loss_fn(prediction, outcome)
+        value, policy = model(board_state, is_white)
+        value_loss = value_loss_fn(value, outcome.float())
+
+        policy = torch.softmax(policy.view(batch_size, -1), axis=1)
+        search_probabilities = torch.softmax(search_probabilities.view(batch_size, -1), axis=1)
+
+        policy_loss = policy_loss_fn(policy, search_probabilities.detach())
+        loss = value_loss + beta * policy_loss
 
         loss.backward()
         optimizer.step()
-
-        batch_size = len(sample[0])
 
         total_loss += loss * batch_size
         num_samples += batch_size
 
     average_loss = total_loss / num_samples
     return average_loss
+
+def save_model(model, folder, i):
+    """
+    Input:
+        model: model to save
+        folder: folder to save to
+        i: iteration number
+    """
+    foldername = f'{folder}/models'
+    filename = f'{foldername}/iteration_{i}'
+
+    #Load previous states
+    if not os.path.exists(foldername):
+        os.makedirs(foldername)
+    torch.save(model.state_dict(), filename)
 
 def seed_everything(seed):
     random.seed(seed)
@@ -163,16 +221,32 @@ def train(args):
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters())
 
-    for i in range(50):
-        current_dataloader = self_play_and_dataset(run_folder_str)
+    for i in range(args.num_training_loops):
+        current_dataloader = self_play_and_dataset(run_folder_str, model, n=args.keep_last_n_games)
         train_evaluator(model, current_dataloader, optimizer)
-        loss = test_model(model, current_dataloader)
-        print(f'{i} {loss}')
+        save_model(model, run_folder_str, i)
+        loss, value_loss, policy_loss = test_model(model, current_dataloader)
+        print(f'{i}\t{loss}\t{value_loss}\t{policy_loss}')
+
+    for i in range(args.num_training_loops):
+        filename = f'{run_folder_str}/models/iteration_{i}'
+        curr_model = PositionEvaluator()
+        curr_model.load_state_dict(torch.load(filename))
+        loss, value_loss, policy_loss = test_model(curr_model, current_dataloader)
+        print(f'{i}\t{loss}\t{value_loss}\t{policy_loss}')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+
+    #Directories
     parser.add_argument('--training_folder', default='training', type=str,
                         help='folder to keep training specific data')
+
+    #Hyperparams
+    parser.add_argument('--num_training_loops', default=50, type=int,
+                        help='amount of self play and optimising loops')
+    parser.add_argument('--keep_last_n_games', default=5, type=int,
+                        help='how many sets of self play are added to the dataset')
 
     args = parser.parse_args()
     train(args)

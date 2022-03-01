@@ -14,6 +14,9 @@ class Pieces(Enum):
 def coor_to_pos(h, w):
     return 5*h+w+1
 
+def pos_to_coor(coor):
+    return int((int(coor)-1)/5), (int(coor)-1)%5
+
 def notation_move(h1,w1,h2,w2):
     return "{}-{}".format(coor_to_pos(h1,w1), coor_to_pos(h2,w2))
 
