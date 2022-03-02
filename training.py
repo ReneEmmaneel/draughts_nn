@@ -34,8 +34,9 @@ class PositionEvaluator(nn.Module):
 
         self.policy_head = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(self.c_hidden*5,50*50),
-            nn.ReLU()
+            nn.Linear(self.c_hidden*5,self.c_hidden*5),
+            nn.ReLU(),
+            nn.Linear(self.c_hidden*5,50*50)
         )
 
     def forward(self, board_state, is_white):
@@ -49,10 +50,13 @@ class PositionEvaluator(nn.Module):
         board_state = torch.cat((board_state, is_white), dim=3)
 
         board_state = board_state.permute(0,3,1,2)
-        board_state = self.input(board_state)
 
-        policy = self.policy_head(board_state).reshape(-1,H,W,H,W)
-        value = self.value_head(board_state).reshape(-1)
+        output = self.input(board_state)
+        if torch.isnan(output).any():
+            raise NotImplementedError()
+
+        policy = self.policy_head(output).reshape(-1,H,W,H,W)
+        value = self.value_head(output).reshape(-1)
 
         return value, policy
 
@@ -89,7 +93,7 @@ def self_play_and_dataset(run_folder, model, n=5):
 
     #Make dataset
     game_state_dataset = GameStateDataset(previous_states)
-    dataloader = DataLoader(game_state_dataset, batch_size=4, shuffle=True, num_workers=0, drop_last=True)
+    dataloader = DataLoader(game_state_dataset, batch_size=64, shuffle=True, num_workers=0, drop_last=True)
     return dataloader
 
 @torch.no_grad()
@@ -123,7 +127,7 @@ def test_model(model, data_loader, beta=1):
         value_loss = value_loss_fn(value, outcome.float())
 
         policy = torch.softmax(policy.view(batch_size, -1), axis=1)
-        search_probabilities = torch.softmax(search_probabilities.view(batch_size, -1), axis=1)
+        search_probabilities = search_probabilities.view(batch_size, -1)
 
         policy_loss = policy_loss_fn(policy, search_probabilities.detach())
         loss = value_loss + beta * policy_loss
@@ -169,7 +173,7 @@ def train_evaluator(model, data_loader, optimizer, beta=1):
         value_loss = value_loss_fn(value, outcome.float())
 
         policy = torch.softmax(policy.view(batch_size, -1), axis=1)
-        search_probabilities = torch.softmax(search_probabilities.view(batch_size, -1), axis=1)
+        search_probabilities = search_probabilities.view(batch_size, -1)
 
         policy_loss = policy_loss_fn(policy, search_probabilities.detach())
         loss = value_loss + beta * policy_loss
