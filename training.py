@@ -6,7 +6,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from datetime import datetime
 
-from self_play import play_games, GameStateDataset
+from self_play import play_games, GameStateDataset, model_vs
 
 class PositionEvaluator(nn.Module):
     def __init__(self):
@@ -232,12 +232,17 @@ def train(args):
         loss, value_loss, policy_loss = test_model(model, current_dataloader)
         print(f'{i}\t{loss}\t{value_loss}\t{policy_loss}')
 
+    last_model_filename = f'{run_folder_str}/models/iteration_{args.num_training_loops - 1}'
+    last_model = PositionEvaluator()
+    last_model.load_state_dict(torch.load(last_model_filename))
+
     for i in range(args.num_training_loops):
         filename = f'{run_folder_str}/models/iteration_{i}'
         curr_model = PositionEvaluator()
         curr_model.load_state_dict(torch.load(filename))
         loss, value_loss, policy_loss = test_model(curr_model, current_dataloader)
         print(f'{i}\t{loss}\t{value_loss}\t{policy_loss}')
+        print(f'last vs {i}:\t{model_vs(last_model, curr_model)}')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

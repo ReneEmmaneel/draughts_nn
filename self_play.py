@@ -131,12 +131,11 @@ def MCTS(model, subtree, board_state, is_white, run_time=10, deterministic=False
 
     return next_move, real_move_probabilities.squeeze(), next_node
 
-def play_games(model, k=1000, max_length=100):
+def play_games(model, k=1000, max_length=200):
     """Play k games of given max_length.
     return list of (gamestate, current_player, outcome) tuples
     """
     all_states = []
-    subtree = None
 
     for i in range(k):
         states_current_game = []
@@ -161,6 +160,32 @@ def play_games(model, k=1000, max_length=100):
 
         all_states = all_states + [(_[0], torch.Tensor([int(_[1])*2-1]), win_value, search_probabilities) for _ in states_current_game]
     return all_states
+
+def model_vs(model1, model2, max_length=200, num_games=20):
+    tot_win_value = 0.
+    for i in range(num_games):
+        position = draughts.load_position()
+        game_over = False
+        win_value = 0
+        subtree = None
+        turns = 0
+        while win_value == 0 and turns < max_length:
+            turns += 1
+            moves_dict = dict(draughts.possible_moves(*position))
+            if len(moves_dict.keys()) == 0:
+                break
+
+            model = [model1,model2][int(position[1])]
+            move, search_probabilities, subtree = MCTS(model, subtree, *position)
+
+            position = (moves_dict[move], not position[1])
+            win_value = draughts.check_win(position[0])
+
+        if win_value == 0 and turns < max_length:
+            win_value = int(position[1]) * -2 + 1
+
+        tot_win_value +=  win_value
+    return tot_win_value/num_games
 
 class GameStateDataset(Dataset):
     """GameStateDataset"""
