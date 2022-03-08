@@ -27,7 +27,7 @@ class Node():
     def add_child(self, notation, child_node):
         self.children.append((notation, child_node))
 
-def MCTS(model, subtree, board_state, is_white, run_time=10, deterministic=False, temperature=1):
+def MCTS(model, subtree, board_state, is_white, args, deterministic=False):
     """Monte Carlo Tree Search (MCTS)
     Pretty cool algorithm, instead of alpha-beta pruning or some other tree search
     that only looks are the value of each nodes, it uses the policy head to estimate
@@ -58,7 +58,8 @@ def MCTS(model, subtree, board_state, is_white, run_time=10, deterministic=False
         root = Node(board_state, is_white, 1)
     else:
         root = subtree
-        run_time -= root.N
+
+    run_time = args.MCTS_run_time - root.N
 
     def add_children(node, moves_dict):
         #Given a node, loop through all possible moves and add child nodes, including their priors
@@ -109,7 +110,7 @@ def MCTS(model, subtree, board_state, is_white, run_time=10, deterministic=False
             node.Q = node.W / node.N
 
     moves_with_n = [(child[0], child[1].N) for child in root.children]
-    probabilities = [p[1] ** (1/temperature) for p in moves_with_n]
+    probabilities = [p[1] ** (1/args.temperature) for p in moves_with_n]
     probabilities = [float(i)/sum(probabilities) for i in probabilities]
 
     if deterministic:
@@ -131,10 +132,13 @@ def MCTS(model, subtree, board_state, is_white, run_time=10, deterministic=False
 
     return next_move, real_move_probabilities.squeeze(), next_node
 
-def play_games(model, k=1000, max_length=200):
+def play_games(model, args):
     """Play k games of given max_length.
     return list of (gamestate, current_player, outcome) tuples
     """
+    k = args.generate_k_games
+
+
     all_states = []
 
     for i in range(k):
@@ -144,25 +148,35 @@ def play_games(model, k=1000, max_length=200):
         win_value = 0
         subtree = None
 
-        while win_value == 0 and len(states_current_game) < max_length:
+        while win_value == 0 and len(states_current_game) < args.max_length_games:
             moves_dict = dict(draughts.possible_moves(*position))
             if len(moves_dict.keys()) == 0:
                 break
 
-            move, search_probabilities, subtree = MCTS(model, subtree, *position)
+            move, search_probabilities, subtree = MCTS(model, subtree, *position, args)
 
             position = (moves_dict[move], not position[1])
             states_current_game.append((*position, search_probabilities))
             win_value = draughts.check_win(position[0])
 
-        if win_value == 0 and len(states_current_game) < max_length:
+        if win_value == 0 and len(states_current_game) < args.max_length_games:
             win_value = int(position[1]) * -2 + 1
 
         all_states = all_states + [(_[0], torch.Tensor([int(_[1])*2-1]), win_value, search_probabilities) for _ in states_current_game]
     return all_states
 
 def model_vs(model1, model2, max_length=200, num_games=20):
-    tot_win_value = 0.
+    """Play out a set amount of games between two models.
+    The score is the average game score, with 1 meaning that model1 won all games.
+
+    Input:
+        model1, model2 - pretrained PositionEvaluator model
+        max_length - max length of a game
+        num_games - amount of games to simulate
+    Output:
+        average_game_value - [-1,1] indicating average game score
+    """
+    tot_game_value = 0.
     for i in range(num_games):
         position = draughts.load_position()
         game_over = False
@@ -175,7 +189,9 @@ def model_vs(model1, model2, max_length=200, num_games=20):
             if len(moves_dict.keys()) == 0:
                 break
 
-            model = [model1,model2][int(position[1])]
+            #Choose model, on odd games, model1 is white, on even games, model2 is white
+            model = [model1,model2][int(position[1]) == i % 2]
+
             move, search_probabilities, subtree = MCTS(model, subtree, *position)
 
             position = (moves_dict[move], not position[1])
@@ -184,13 +200,15 @@ def model_vs(model1, model2, max_length=200, num_games=20):
         if win_value == 0 and turns < max_length:
             win_value = int(position[1]) * -2 + 1
 
-        tot_win_value +=  win_value
-    return tot_win_value/num_games
+        if i % 2 == 1:
+            tot_game_value -= win_value
+        else:
+            tot_game_value += win_value
+    return tot_game_value/num_games
 
 class GameStateDataset(Dataset):
     """GameStateDataset"""
-
-    def __init__(self, data, transform=None):
+    def __init__(self, data):
         """
         Args:
             data (list): List with gamestate data as tuples.

@@ -1,6 +1,6 @@
-#Glob
 from enum import Enum
 import torch
+
 class Pieces(Enum):
     EMPTY = 0
     WHITE_PIECE = 1

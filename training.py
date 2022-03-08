@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from datetime import datetime
+import json
 
 from self_play import play_games, GameStateDataset, model_vs
 
@@ -64,13 +65,14 @@ class PositionEvaluator(nn.Module):
     def device(self):
         return next(self.parameters()).device
 
-def self_play_and_dataset(run_folder, model, n=5):
+def self_play_and_dataset(run_folder, model, args):
     """Self play and create new dataset
     input:
         run_folder - str with path to folder to save previous states
-        n - how many previous saved states to add to newly generated states
+        model - latest model
+        args.keep_previous_n_games - how many previous saved states to add to newly generated states
     """
-    all_new_states = play_games(model, k=3)
+    all_new_states = play_games(model, args)
     previous_states = all_new_states
     saved_positions_folder = f'{run_folder}/saved_positions'
 
@@ -80,7 +82,7 @@ def self_play_and_dataset(run_folder, model, n=5):
         for filename in os.listdir(saved_positions_folder):
             all_files.append(filename.split('.')[0])
         #Only look at previous n states
-        for file in sorted(all_files[0:n]):
+        for file in sorted(all_files[0:args.keep_previous_n_games]):
             with open(f'{saved_positions_folder}/{file}.pkl', 'rb') as inp:
                 previous_states = previous_states + pickle.load(inp)
     else:
@@ -93,7 +95,7 @@ def self_play_and_dataset(run_folder, model, n=5):
 
     #Make dataset
     game_state_dataset = GameStateDataset(previous_states)
-    dataloader = DataLoader(game_state_dataset, batch_size=64, shuffle=True, num_workers=0, drop_last=True)
+    dataloader = DataLoader(game_state_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
     return dataloader
 
 @torch.no_grad()
@@ -212,6 +214,12 @@ def seed_everything(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+def write_config_file(run_folder_str, args):
+    config_file = f'{run_folder_str}/config_file.json'
+
+    with open(config_file, "w") as outfile:
+        json.dump(vars(args), outfile, indent=2)
+
 def train(args):
     if not os.path.exists(args.training_folder):
         os.makedirs(args.training_folder)
@@ -220,13 +228,15 @@ def train(args):
     run_folder_str = f'{args.training_folder}/{time_string}'
     os.makedirs(run_folder_str)
 
+    write_config_file(run_folder_str, args)
+
     model = PositionEvaluator()
     device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters())
 
     for i in range(args.num_training_loops):
-        current_dataloader = self_play_and_dataset(run_folder_str, model, n=args.keep_last_n_games)
+        current_dataloader = self_play_and_dataset(run_folder_str, model, args)
         train_evaluator(model, current_dataloader, optimizer)
         save_model(model, run_folder_str, i)
         loss, value_loss, policy_loss = test_model(model, current_dataloader)
@@ -242,7 +252,7 @@ def train(args):
         curr_model.load_state_dict(torch.load(filename))
         loss, value_loss, policy_loss = test_model(curr_model, current_dataloader)
         print(f'{i}\t{loss}\t{value_loss}\t{policy_loss}')
-        print(f'last vs {i}:\t{model_vs(last_model, curr_model)}')
+        print(f'last vs {i}:\t{model_vs(last_model, curr_model, args.max_length_games, num_games=20)}')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -250,12 +260,26 @@ if __name__ == "__main__":
     #Directories
     parser.add_argument('--training_folder', default='training', type=str,
                         help='folder to keep training specific data')
+    parser.add_argument('--config_file', default='', type=str,
+                        help='file with hyperparams in json format')
 
     #Hyperparams
     parser.add_argument('--num_training_loops', default=50, type=int,
                         help='amount of self play and optimising loops')
     parser.add_argument('--keep_last_n_games', default=5, type=int,
                         help='how many sets of self play are added to the dataset')
+    parser.add_argument('--MCTS_run_time', default=1600, type=int,
+                        help='how many leave nodes to traverse to')
+    parser.add_argument('--temperature', default=1., type=float,
+                        help='value controlling exploration in MCTS')
+    parser.add_argument('--generate_k_games', default=100, type=float,
+                        help='number of games to generated during self_play')
+    parser.add_argument('--max_length_games', default=200, type=int,
+                        help='max length of a game during self_play')
+    parser.add_argument('--keep_previous_n_games', default=5, type=int,
+                        help='how many retraining cycles to keep previous games for')
+    parser.add_argument('--batch_size', default=64, type=int,
+                        help='batch size for training the neural network')
 
     args = parser.parse_args()
     train(args)
