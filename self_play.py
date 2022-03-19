@@ -1,3 +1,5 @@
+import time
+
 import re
 
 import draughts
@@ -6,6 +8,8 @@ import torch
 import utils
 from numpy.random import choice
 from torch.utils.data import Dataset, DataLoader
+from tqdm import *
+import multiprocessing as mp
 
 def bool_to_tensor(bool):
     return torch.unsqueeze(torch.Tensor([int(bool)*2-1]), dim=0)
@@ -38,18 +42,20 @@ def MCTS(model, subtree, board_state, is_white, args, deterministic=False):
 
     Input:
         model: neural network, takes in the board state, returns value and policy
-        subtree: if not None, use this subtree to store already calculated positions
-        board_state: the current board
-        is_white: boolean that's true if it is whites turn
-        run_time: how many leaves are looked at
+        subtrees: list of subtrees. If not None, use these subtree to store already calculated positions
+        board_states: list of current boards
+        is_white_list: list of booleans that's true if it is whites turn
+        args.MCTS_run_time: how many leaves are looked at
+        args.temperature: value that encourages exploration
         deterministic: if true, return highest probability move, otherwise randomly sample
-        temperature: value that encourages exploration
     Output:
-        next_move: notation of the next move
-        move_probabilities: real move probabilities (used to train the policy head)
+        next_moves: list of notations of the next move
+        move_probabilities_list: list of real move probabilities (used to train the policy head)
     """
     model.eval()
+
     is_white_tensor = bool_to_tensor(is_white)
+
     value, move_probabilities = model(torch.unsqueeze(board_state, dim=0), is_white_tensor)
 
     moves_dict = dict(draughts.possible_moves(board_state, is_white))
@@ -79,7 +85,8 @@ def MCTS(model, subtree, board_state, is_white, args, deterministic=False):
     if len(root.children) == 0:
         add_children(root, moves_dict)
 
-    for i in range(run_time):
+    #Loop over the run_time, this bar is always set to False
+    for i in trange(run_time, leave=False, total=args.MCTS_run_time, initial=root.N, desc="MCTS search", disable=True):
         traverstion = [root]
 
         while len(traverstion[-1].children) > 0:
@@ -132,46 +139,57 @@ def MCTS(model, subtree, board_state, is_white, args, deterministic=False):
 
     return next_move, real_move_probabilities.squeeze(), next_node
 
-def play_games(model, args):
+def play_game(model, args):
+    states_current_game = []
+    position = draughts.load_position()
+    game_over = False
+    win_value = 0
+    subtree = None
+
+    while win_value == 0 and len(states_current_game) < args.max_length_games:
+        moves_dict = dict(draughts.possible_moves(*position))
+        if len(moves_dict.keys()) == 0:
+            break
+
+        move, search_probabilities, subtree = MCTS(model, subtree, *position, args)
+
+        position = (moves_dict[move], not position[1])
+        states_current_game.append((*position, search_probabilities))
+        win_value = draughts.check_win(position[0])
+
+    if win_value == 0 and len(states_current_game) < args.max_length_games:
+        win_value = int(position[1]) * -2 + 1
+
+    state = [(_[0], torch.Tensor([int(_[1])*2-1]), win_value, search_probabilities) for _ in states_current_game]
+
+    return state
+
+def play_games(model, pool, args):
     """Play k games of given max_length.
     return list of (gamestate, current_player, outcome) tuples
     """
+    all_states = []
     k = args.generate_k_games
 
-
-    all_states = []
-
     for i in range(k):
-        states_current_game = []
-        position = draughts.load_position()
-        game_over = False
-        win_value = 0
-        subtree = None
+        state = pool.apply_async(play_game, args=(model, args))
+        if not state is None:
+            all_states.append(state)
 
-        while win_value == 0 and len(states_current_game) < args.max_length_games:
-            moves_dict = dict(draughts.possible_moves(*position))
-            if len(moves_dict.keys()) == 0:
-                break
+    all_states = [state.get() for state in all_states]
+    all_final_states = []
+    for states in all_states:
+        all_final_states = all_final_states + states
 
-            move, search_probabilities, subtree = MCTS(model, subtree, *position, args)
+    return all_final_states
 
-            position = (moves_dict[move], not position[1])
-            states_current_game.append((*position, search_probabilities))
-            win_value = draughts.check_win(position[0])
-
-        if win_value == 0 and len(states_current_game) < args.max_length_games:
-            win_value = int(position[1]) * -2 + 1
-
-        all_states = all_states + [(_[0], torch.Tensor([int(_[1])*2-1]), win_value, search_probabilities) for _ in states_current_game]
-    return all_states
-
-def model_vs(model1, model2, max_length=200, num_games=20):
+def model_vs(model1, model2, args, num_games=20):
     """Play out a set amount of games between two models.
     The score is the average game score, with 1 meaning that model1 won all games.
 
     Input:
         model1, model2 - pretrained PositionEvaluator model
-        max_length - max length of a game
+        args.max_length - max length of a game
         num_games - amount of games to simulate
     Output:
         average_game_value - [-1,1] indicating average game score
@@ -183,7 +201,7 @@ def model_vs(model1, model2, max_length=200, num_games=20):
         win_value = 0
         subtree = None
         turns = 0
-        while win_value == 0 and turns < max_length:
+        while win_value == 0 and turns < args.max_length_games:
             turns += 1
             moves_dict = dict(draughts.possible_moves(*position))
             if len(moves_dict.keys()) == 0:
@@ -192,12 +210,12 @@ def model_vs(model1, model2, max_length=200, num_games=20):
             #Choose model, on odd games, model1 is white, on even games, model2 is white
             model = [model1,model2][int(position[1]) == i % 2]
 
-            move, search_probabilities, subtree = MCTS(model, subtree, *position)
+            move, search_probabilities, subtree = MCTS(model, subtree, *position, args)
 
             position = (moves_dict[move], not position[1])
             win_value = draughts.check_win(position[0])
 
-        if win_value == 0 and turns < max_length:
+        if win_value == 0 and turns < args.max_length_games:
             win_value = int(position[1]) * -2 + 1
 
         if i % 2 == 1:

@@ -6,6 +6,8 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from datetime import datetime
 import json
+from tqdm import tqdm
+import multiprocessing as mp
 
 from self_play import play_games, GameStateDataset, model_vs
 
@@ -47,7 +49,7 @@ class PositionEvaluator(nn.Module):
         W = 5
         H = 10
 
-        is_white = is_white.squeeze().repeat(50).reshape(-1,H,W,1)
+        is_white = is_white.squeeze().repeat(H*W).reshape(-1,H,W,1)
         board_state = torch.cat((board_state, is_white), dim=3)
 
         board_state = board_state.permute(0,3,1,2)
@@ -65,14 +67,14 @@ class PositionEvaluator(nn.Module):
     def device(self):
         return next(self.parameters()).device
 
-def self_play_and_dataset(run_folder, model, args):
+def self_play_and_dataset(run_folder, model, pool, args):
     """Self play and create new dataset
     input:
         run_folder - str with path to folder to save previous states
         model - latest model
         args.keep_previous_n_games - how many previous saved states to add to newly generated states
     """
-    all_new_states = play_games(model, args)
+    all_new_states = play_games(model, pool, args)
     previous_states = all_new_states
     saved_positions_folder = f'{run_folder}/saved_positions'
 
@@ -95,7 +97,7 @@ def self_play_and_dataset(run_folder, model, args):
 
     #Make dataset
     game_state_dataset = GameStateDataset(previous_states)
-    dataloader = DataLoader(game_state_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
+    dataloader = DataLoader(game_state_dataset, batch_size=args.batch_size, shuffle=True, drop_last=False)
     return dataloader
 
 @torch.no_grad()
@@ -145,7 +147,7 @@ def test_model(model, data_loader, beta=1):
     average_policy_loss = total_value_loss / num_samples
     return average_loss, average_value_loss, average_policy_loss
 
-def train_evaluator(model, data_loader, optimizer, beta=1):
+def train_evaluator(model, data_loader, optimizer, args, beta=1):
     """
     Function for training a model on a dataset. Train the model for one epoch.
     Inputs:
@@ -161,7 +163,8 @@ def train_evaluator(model, data_loader, optimizer, beta=1):
 
     value_loss_fn = nn.MSELoss()
     policy_loss_fn = nn.BCELoss()
-    for batch_ndx, sample in enumerate(data_loader):
+
+    for batch_ndx, sample in tqdm(enumerate(data_loader), desc='Train evaluator model', leave=False) if args.verbose else enumerate(data_loader):
         model.train()
         board_state          = sample[0].to(model.device)
         is_white             = sample[1].to(model.device)
@@ -221,6 +224,8 @@ def write_config_file(run_folder_str, args):
         json.dump(vars(args), outfile, indent=2)
 
 def train(args):
+    pool = mp.Pool()
+
     if not os.path.exists(args.training_folder):
         os.makedirs(args.training_folder)
 
@@ -235,12 +240,14 @@ def train(args):
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters())
 
-    for i in range(args.num_training_loops):
-        current_dataloader = self_play_and_dataset(run_folder_str, model, args)
-        train_evaluator(model, current_dataloader, optimizer)
+    iterator = range(args.num_training_loops)
+    for i in (tqdm(iterator, desc='Training') if args.verbose else iterator):
+        current_dataloader = self_play_and_dataset(run_folder_str, model, pool, args)
+        train_evaluator(model, current_dataloader, optimizer, args)
         save_model(model, run_folder_str, i)
         loss, value_loss, policy_loss = test_model(model, current_dataloader)
-        print(f'{i}\t{loss}\t{value_loss}\t{policy_loss}')
+        with open(f'{run_folder_str}/losses.txt', "a") as file:
+            file.write(f'{i}\t{loss}\t{value_loss}\t{policy_loss}\n')
 
     last_model_filename = f'{run_folder_str}/models/iteration_{args.num_training_loops - 1}'
     last_model = PositionEvaluator()
@@ -251,8 +258,13 @@ def train(args):
         curr_model = PositionEvaluator()
         curr_model.load_state_dict(torch.load(filename))
         loss, value_loss, policy_loss = test_model(curr_model, current_dataloader)
-        print(f'{i}\t{loss}\t{value_loss}\t{policy_loss}')
-        print(f'last vs {i}:\t{model_vs(last_model, curr_model, args.max_length_games, num_games=20)}')
+        with open(f'{run_folder_str}/final_losses.txt', "a") as file:
+            file.write(f'{i}\t{loss}\t{value_loss}\t{policy_loss}\n')
+        with open(f'{run_folder_str}/final_tournament.txt', "a") as file:
+            file.write(f'last vs {i}:\t{model_vs(last_model, curr_model, args, num_games=20)}\n')
+
+    pool.close()
+    pool.join()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -266,13 +278,11 @@ if __name__ == "__main__":
     #Hyperparams
     parser.add_argument('--num_training_loops', default=50, type=int,
                         help='amount of self play and optimising loops')
-    parser.add_argument('--keep_last_n_games', default=5, type=int,
-                        help='how many sets of self play are added to the dataset')
     parser.add_argument('--MCTS_run_time', default=1600, type=int,
                         help='how many leave nodes to traverse to')
     parser.add_argument('--temperature', default=1., type=float,
                         help='value controlling exploration in MCTS')
-    parser.add_argument('--generate_k_games', default=100, type=float,
+    parser.add_argument('--generate_k_games', default=100, type=int,
                         help='number of games to generated during self_play')
     parser.add_argument('--max_length_games', default=200, type=int,
                         help='max length of a game during self_play')
@@ -280,6 +290,9 @@ if __name__ == "__main__":
                         help='how many retraining cycles to keep previous games for')
     parser.add_argument('--batch_size', default=64, type=int,
                         help='batch size for training the neural network')
+
+    #Misc
+    parser.add_argument('--verbose', default=False, action=argparse.BooleanOptionalAction)
 
     args = parser.parse_args()
     train(args)
