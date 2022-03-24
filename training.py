@@ -6,7 +6,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from datetime import datetime
 import json
-from tqdm import tqdm
+from tqdm import *
 import multiprocessing as mp
 
 from self_play import play_games, GameStateDataset, model_vs
@@ -67,17 +67,8 @@ class PositionEvaluator(nn.Module):
     def device(self):
         return next(self.parameters()).device
 
-def self_play_and_dataset(run_folder, model, pool, args):
-    """Self play and create new dataset
-    input:
-        run_folder - str with path to folder to save previous states
-        model - latest model
-        args.keep_previous_n_games - how many previous saved states to add to newly generated states
-    """
-    all_new_states = play_games(model, pool, args)
-    previous_states = all_new_states
+def get_dataloader(run_folder, previous_states = []):
     saved_positions_folder = f'{run_folder}/saved_positions'
-
     #Load previous states
     if os.path.exists(saved_positions_folder):
         all_files = []
@@ -90,14 +81,29 @@ def self_play_and_dataset(run_folder, model, pool, args):
     else:
         os.makedirs(saved_positions_folder)
 
+    #Make dataset
+    game_state_dataset = GameStateDataset(previous_states)
+    dataloader = DataLoader(game_state_dataset, batch_size=args.batch_size, shuffle=True, drop_last=False)
+    return dataloader
+
+def self_play_and_dataset(run_folder, model, pool, args):
+    """Self play and create new dataset
+    input:
+        run_folder - str with path to folder to save previous states
+        model - latest model
+        args.keep_previous_n_games - how many previous saved states to add to newly generated states
+    """
+    all_new_states = play_games(model, pool, args)
+    previous_states = all_new_states
+    saved_positions_folder = f'{run_folder}/saved_positions'
+
+    dataloader = get_dataloader(run_folder, previous_states=previous_states)
+
     #Save current generated states
     amount = len(os.listdir(saved_positions_folder))
     with open(f'{saved_positions_folder}/{amount:09d}.pkl', 'wb') as outp:
         pickle.dump(all_new_states, outp, pickle.HIGHEST_PROTOCOL)
 
-    #Make dataset
-    game_state_dataset = GameStateDataset(previous_states)
-    dataloader = DataLoader(game_state_dataset, batch_size=args.batch_size, shuffle=True, drop_last=False)
     return dataloader
 
 @torch.no_grad()
@@ -164,30 +170,31 @@ def train_evaluator(model, data_loader, optimizer, args, beta=1):
     value_loss_fn = nn.MSELoss()
     policy_loss_fn = nn.BCELoss()
 
-    for batch_ndx, sample in tqdm(enumerate(data_loader), desc='Train evaluator model', leave=False) if args.verbose else enumerate(data_loader):
-        model.train()
-        board_state          = sample[0].to(model.device)
-        is_white             = sample[1].to(model.device)
-        outcome              = sample[2].to(model.device)
-        search_probabilities = sample[3].to(model.device)
+    for epochs in trange(args.epochs_per_train_evaluator, leave=False, disable=not args.verbose):
+        for batch_ndx, sample in tqdm(enumerate(data_loader), desc='Train evaluator model', leave=False) if args.verbose else enumerate(data_loader):
+            model.train()
+            board_state          = sample[0].to(model.device)
+            is_white             = sample[1].to(model.device)
+            outcome              = sample[2].to(model.device)
+            search_probabilities = sample[3].to(model.device)
 
-        batch_size = len(sample[0])
+            batch_size = len(sample[0])
 
-        optimizer.zero_grad()
-        value, policy = model(board_state, is_white)
-        value_loss = value_loss_fn(value, outcome.float())
+            optimizer.zero_grad()
+            value, policy = model(board_state, is_white)
+            value_loss = value_loss_fn(value, outcome.float())
 
-        policy = torch.softmax(policy.view(batch_size, -1), axis=1)
-        search_probabilities = search_probabilities.view(batch_size, -1)
+            policy = torch.softmax(policy.view(batch_size, -1), axis=1)
+            search_probabilities = search_probabilities.view(batch_size, -1)
 
-        policy_loss = policy_loss_fn(policy, search_probabilities.detach())
-        loss = value_loss + beta * policy_loss
+            policy_loss = policy_loss_fn(policy, search_probabilities.detach())
+            loss = value_loss + beta * policy_loss
 
-        loss.backward()
-        optimizer.step()
+            loss.backward()
+            optimizer.step()
 
-        total_loss += loss * batch_size
-        num_samples += batch_size
+            total_loss += loss * batch_size
+            num_samples += batch_size
 
     average_loss = total_loss / num_samples
     return average_loss
@@ -223,9 +230,10 @@ def write_config_file(run_folder_str, args):
     with open(config_file, "w") as outfile:
         json.dump(vars(args), outfile, indent=2)
 
-def train(args):
-    pool = mp.Pool()
-
+def before_training(args):
+    """Function to be called, only when starting training for the first time,
+    meaning it is not called when started from continue_training.py
+    """
     if not os.path.exists(args.training_folder):
         os.makedirs(args.training_folder)
 
@@ -234,24 +242,57 @@ def train(args):
     os.makedirs(run_folder_str)
 
     write_config_file(run_folder_str, args)
+    return run_folder_str
 
+def train(args, run_folder_str):
+    """Function that creates the model, and finishes the training loop.
+    This loop includes selfplay and training the neural network.
+    If the run_folder already contains previous models, use the latest model.
+    """
     model = PositionEvaluator()
     device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters())
 
-    iterator = range(args.num_training_loops)
+    #Load latest model
+    saved_models_folder = f'{run_folder_str}/models'
+    all_models = []
+    if os.path.exists(saved_models_folder):
+        for filename in os.listdir(saved_models_folder):
+            all_models.append(int(filename.split('_')[1]))
+        all_models.sort(reverse=True)
+        #load latest model, if applicable
+        if len(all_models) > 0:
+            model.load_state_dict(torch.load(f'{saved_models_folder}/iteration_{all_models[0]}'))
+
+    #Only allow parallel execution if we are not continuing to train,
+    #somehow, multiprocessing does not work when continue training :(
+    #TODO: fix it so that multiprocessing does work when continue training
+    parallel=len(all_models) == 0
+    if parallel:
+        pool = mp.Pool()
+
+    iterator = range(len(all_models), args.num_training_loops)
     for i in (tqdm(iterator, desc='Training') if args.verbose else iterator):
-        current_dataloader = self_play_and_dataset(run_folder_str, model, pool, args)
+        current_dataloader = self_play_and_dataset(run_folder_str, model, pool if parallel else None, args)
         train_evaluator(model, current_dataloader, optimizer, args)
         save_model(model, run_folder_str, i)
         loss, value_loss, policy_loss = test_model(model, current_dataloader)
         with open(f'{run_folder_str}/losses.txt', "a") as file:
             file.write(f'{i}\t{loss}\t{value_loss}\t{policy_loss}\n')
 
+    if parallel:
+        pool.close()
+        pool.join()
+
+def evaluate(args, run_folder_str):
     last_model_filename = f'{run_folder_str}/models/iteration_{args.num_training_loops - 1}'
     last_model = PositionEvaluator()
+    device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+    last_model = last_model.to(device)
     last_model.load_state_dict(torch.load(last_model_filename))
+
+    current_dataloader = get_dataloader(run_folder_str)
 
     for i in range(args.num_training_loops):
         filename = f'{run_folder_str}/models/iteration_{i}'
@@ -263,8 +304,10 @@ def train(args):
         with open(f'{run_folder_str}/final_tournament.txt', "a") as file:
             file.write(f'last vs {i}:\t{model_vs(last_model, curr_model, args, num_games=20)}\n')
 
-    pool.close()
-    pool.join()
+def main(args):
+    run_folder_str = before_training(args)
+    train(args, run_folder_str)
+    evaluate(args, run_folder_str)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -272,8 +315,6 @@ if __name__ == "__main__":
     #Directories
     parser.add_argument('--training_folder', default='training', type=str,
                         help='folder to keep training specific data')
-    parser.add_argument('--config_file', default='', type=str,
-                        help='file with hyperparams in json format')
 
     #Hyperparams
     parser.add_argument('--num_training_loops', default=50, type=int,
@@ -290,9 +331,11 @@ if __name__ == "__main__":
                         help='how many retraining cycles to keep previous games for')
     parser.add_argument('--batch_size', default=64, type=int,
                         help='batch size for training the neural network')
+    parser.add_argument('--epochs_per_train_evaluator', default=4, type=int,
+                        help='epochs per evaluator training cycle')
 
     #Misc
     parser.add_argument('--verbose', default=False, action=argparse.BooleanOptionalAction)
 
     args = parser.parse_args()
-    train(args)
+    main(args)

@@ -168,20 +168,26 @@ def play_games(model, pool, args):
     """Play k games of given max_length.
     return list of (gamestate, current_player, outcome) tuples
     """
-    all_states = []
-    k = args.generate_k_games
+    if not pool is None:
+        all_states = []
+        k = args.generate_k_games
 
-    for i in range(k):
-        state = pool.apply_async(play_game, args=(model, args))
-        if not state is None:
-            all_states.append(state)
+        for i in range(k):
+            state = pool.apply_async(play_game, args=(model, args))
+            if not state is None:
+                all_states.append(state)
 
-    all_states = [state.get() for state in all_states]
-    all_final_states = []
-    for states in all_states:
-        all_final_states = all_final_states + states
+        all_states = [state.get() for state in all_states]
+        all_final_states = []
+        for states in all_states:
+            all_final_states = all_final_states + states
 
-    return all_final_states
+        return all_final_states
+    else:
+        all_states = []
+        for i in trange(args.generate_k_games, disable=not args.verbose, leave=False):
+            all_states = all_states + play_game(model, args)
+        return all_states
 
 def model_vs(model1, model2, args, num_games=20):
     """Play out a set amount of games between two models.
