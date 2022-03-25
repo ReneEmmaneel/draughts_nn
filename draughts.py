@@ -17,6 +17,7 @@ import torch
 import random
 
 from utils import *
+import self_play
 
 def check_win(board_state):
     """Given a board_state, returns 0 if not a win,
@@ -267,7 +268,6 @@ def play_game():
                 continue
             position = (moves_dict[move], not position[1])
             print_position(*position)
-            break
         win_value = check_win(position[0])
 
     if win_value == 0:
@@ -278,6 +278,45 @@ def play_game():
     elif win_value == -1:
         print('Black won the game!')
 
+def play_game_against_model(model, args):
+    """Play game against model.
+    Player is white."""
+    position = load_position()
+    print_position(*position)
+
+    game_over = False
+    win_value = 0
+    while win_value == 0:
+        moves_dict = dict(possible_moves(*position))
+        if len(moves_dict.keys()) == 0:
+            break
+        while True: #Loop until valid move is made
+            if position[1]: #players turn
+                move = input("Enter move: ")
+                if move == 'r':
+                    move = random.choice(list(moves_dict.keys()))
+                    print('Playing {}'.format(move))
+                elif not move in moves_dict.keys():
+                    print('Not a valid move')
+                    print(list(moves_dict.keys()))
+                    continue
+                position = (moves_dict[move], not position[1])
+                print_position(*position)
+            else: #models turn
+                move, _, _ = self_play.MCTS(model, None, position[0], position[1], args, show_bar=True, deterministic=True)
+                position = (moves_dict[move], not position[1])
+                print_position(*position)
+            break
+
+        win_value = check_win(position[0])
+
+    if win_value == 0:
+        win_value = int(position[1]) * -2 + 1
+        print(int(position[1]))
+    if win_value == 1:
+        print('White won the game!')
+    elif win_value == -1:
+        print('Black won the game!')
 
 if __name__ == "__main__":
     play_game()

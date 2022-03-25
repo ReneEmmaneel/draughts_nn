@@ -31,7 +31,7 @@ class Node():
     def add_child(self, notation, child_node):
         self.children.append((notation, child_node))
 
-def MCTS(model, subtree, board_state, is_white, args, deterministic=False):
+def MCTS(model, subtree, board_state, is_white, args, show_bar=False, deterministic=False):
     """Monte Carlo Tree Search (MCTS)
     Pretty cool algorithm, instead of alpha-beta pruning or some other tree search
     that only looks are the value of each nodes, it uses the policy head to estimate
@@ -85,8 +85,8 @@ def MCTS(model, subtree, board_state, is_white, args, deterministic=False):
     if len(root.children) == 0:
         add_children(root, moves_dict)
 
-    #Loop over the run_time, this bar is always set to False
-    for i in trange(run_time, leave=False, total=args.MCTS_run_time, initial=root.N, desc="MCTS search", disable=True):
+    #Loop over the run_time
+    for i in trange(run_time, leave=False, total=args.MCTS_run_time, initial=root.N, desc="MCTS search", disable=not show_bar):
         traverstion = [root]
 
         while len(traverstion[-1].children) > 0:
