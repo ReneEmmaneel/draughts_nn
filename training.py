@@ -254,6 +254,7 @@ def train(args, run_folder_str):
     #somehow, multiprocessing does not work when continue training :(
     #TODO: fix it so that multiprocessing does work when continue training
     parallel=len(all_models) == 0
+    parallel = False
     if parallel:
         pool = mp.Pool()
 
