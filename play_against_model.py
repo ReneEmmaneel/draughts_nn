@@ -23,7 +23,7 @@ def play_against_model(args):
     iteration_num = args.iteration if args.iteration >= 0 else args.num_training_loops - 1
 
     model_filename = f'{args.run_folder_str}/models/iteration_{iteration_num}'
-    model = training.PositionEvaluator()
+    model = training.PositionEvaluator(args)
     device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
     model = model.to(device)
     model.load_state_dict(torch.load(model_filename))
