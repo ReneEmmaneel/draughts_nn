@@ -185,7 +185,7 @@ def play_games(model, pool, args):
         return all_final_states
     else:
         all_states = []
-        for i in trange(args.generate_k_games, disable=not args.verbose, leave=False):
+        for i in trange(args.generate_k_games, disable=not args.verbose, leave=False, desc="self play"):
             all_states = all_states + play_game(model, args)
         return all_states
 

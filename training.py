@@ -10,37 +10,17 @@ from tqdm import *
 import multiprocessing as mp
 
 from self_play import play_games, GameStateDataset, model_vs
+from net import InputLayer, ValueHead, PolicyHead
 
 class PositionEvaluator(nn.Module):
-    def __init__(self):
+    def __init__(self, args):
         super().__init__()
 
         self.c_hidden = 10
 
-        self.input = nn.Sequential(
-            nn.Conv2d(6, self.c_hidden, kernel_size=1, bias=True),
-            nn.BatchNorm2d(self.c_hidden),
-            nn.Tanh(),
-            nn.Conv2d(self.c_hidden, self.c_hidden*2, stride=(2,1), kernel_size=3, bias=True),
-            nn.BatchNorm2d(self.c_hidden*2),
-            nn.Tanh(),
-            nn.Conv2d(self.c_hidden*2, self.c_hidden*5, stride=1, kernel_size=(4,3), bias=True),
-            nn.BatchNorm2d(self.c_hidden*5),
-            nn.Tanh()
-        )
-
-        self.value_head = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(self.c_hidden*5,1),
-            nn.Tanh()
-        )
-
-        self.policy_head = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(self.c_hidden*5,self.c_hidden*5),
-            nn.ReLU(),
-            nn.Linear(self.c_hidden*5,50*50)
-        )
+        self.input = InputLayer(args)
+        self.value_head = ValueHead(args)
+        self.policy_head = PolicyHead(args)
 
     def forward(self, board_state, is_white):
         """Given a [B,H,W,P] board_state and [B] is_white
@@ -55,8 +35,9 @@ class PositionEvaluator(nn.Module):
         board_state = board_state.permute(0,3,1,2)
 
         output = self.input(board_state)
+
         if torch.isnan(output).any():
-            raise NotImplementedError()
+            raise ValueError("NaN value detected in PositionEvaluator")
 
         policy = self.policy_head(output).reshape(-1,H,W,H,W)
         value = self.value_head(output).reshape(-1)
@@ -170,7 +151,7 @@ def train_evaluator(model, data_loader, optimizer, args, beta=1):
     value_loss_fn = nn.MSELoss()
     policy_loss_fn = nn.BCELoss()
 
-    for epochs in trange(args.epochs_per_train_evaluator, leave=False, disable=not args.verbose):
+    for epochs in trange(args.epochs_per_train_evaluator, desc="NN training epochs", leave=False, disable=not args.verbose):
         for batch_ndx, sample in tqdm(enumerate(data_loader), desc='Train evaluator model', leave=False) if args.verbose else enumerate(data_loader):
             model.train()
             board_state          = sample[0].to(model.device)
@@ -249,10 +230,14 @@ def train(args, run_folder_str):
     This loop includes selfplay and training the neural network.
     If the run_folder already contains previous models, use the latest model.
     """
-    model = PositionEvaluator()
+    model = PositionEvaluator(args)
     device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters())
+
+    if args.verbose:
+        num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f'Created model with {num_params} parameters')
 
     #Load latest model
     saved_models_folder = f'{run_folder_str}/models'
@@ -287,7 +272,7 @@ def train(args, run_folder_str):
 
 def evaluate(args, run_folder_str):
     last_model_filename = f'{run_folder_str}/models/iteration_{args.num_training_loops - 1}'
-    last_model = PositionEvaluator()
+    last_model = PositionEvaluator(args)
     device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
     last_model = last_model.to(device)
     last_model.load_state_dict(torch.load(last_model_filename))
@@ -296,7 +281,7 @@ def evaluate(args, run_folder_str):
 
     for i in range(args.num_training_loops):
         filename = f'{run_folder_str}/models/iteration_{i}'
-        curr_model = PositionEvaluator()
+        curr_model = PositionEvaluator(args)
         curr_model.load_state_dict(torch.load(filename))
         loss, value_loss, policy_loss = test_model(curr_model, current_dataloader)
         with open(f'{run_folder_str}/final_losses.txt', "a") as file:
@@ -333,6 +318,14 @@ if __name__ == "__main__":
                         help='batch size for training the neural network')
     parser.add_argument('--epochs_per_train_evaluator', default=4, type=int,
                         help='epochs per evaluator training cycle')
+
+    #Neural archetype hyperparams
+    parser.add_argument('--conv_filters', default=256, type=int,
+                        help='amount of conv filters per layer')
+    parser.add_argument('--residual_layers', default=40, type=int,
+                        help='amount of residual layers')
+    parser.add_argument('--value_head_hidden_layer', default=256, type=int,
+                        help='size of the hidden layer in the value head')
 
     #Misc
     parser.add_argument('--verbose', default=False, action=argparse.BooleanOptionalAction)
