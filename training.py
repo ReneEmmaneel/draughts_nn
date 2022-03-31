@@ -4,10 +4,12 @@ import pickle
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from datetime import datetime
+import datetime
 import json
 from tqdm import *
 import multiprocessing as mp
+import time
+import platform,socket,re,uuid,json,psutil
 
 from self_play import play_games, GameStateDataset, model_vs
 from net import InputLayer, ValueHead, PolicyHead
@@ -85,7 +87,7 @@ def self_play_and_dataset(run_folder, model, pool, args):
     with open(f'{saved_positions_folder}/{amount:09d}.pkl', 'wb') as outp:
         pickle.dump(all_new_states, outp, pickle.HIGHEST_PROTOCOL)
 
-    return dataloader
+    return len(all_new_states), dataloader
 
 @torch.no_grad()
 def test_model(model, data_loader, beta=1):
@@ -211,6 +213,27 @@ def write_config_file(run_folder_str, args):
     with open(config_file, "w") as outfile:
         json.dump(vars(args), outfile, indent=2)
 
+
+def write_system_info(run_folder_str):
+    #Source: https://stackoverflow.com/questions/3103178/how-to-get-the-system-info-with-python
+    try:
+        info={}
+        info['platform']=platform.system()
+        info['platform-release']=platform.release()
+        info['platform-version']=platform.version()
+        info['architecture']=platform.machine()
+        info['hostname']=socket.gethostname()
+        info['processor']=platform.processor()
+        info['ram']=str(round(psutil.virtual_memory().total / (1024.0 **3)))+" GB"
+    except Exception as e:
+        return
+
+    system_info_file = f'{run_folder_str}/system_info_file.json'
+
+    with open(system_info_file, "w") as outfile:
+        json.dump(info, outfile, indent=2)
+
+
 def before_training(args):
     """Function to be called, only when starting training for the first time,
     meaning it is not called when started from continue_training.py
@@ -218,11 +241,12 @@ def before_training(args):
     if not os.path.exists(args.training_folder):
         os.makedirs(args.training_folder)
 
-    time_string = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    time_string = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     run_folder_str = f'{args.training_folder}/{time_string}'
     os.makedirs(run_folder_str)
 
     write_config_file(run_folder_str, args)
+    write_system_info(run_folder_str)
     return run_folder_str
 
 def train(args, run_folder_str):
@@ -254,18 +278,36 @@ def train(args, run_folder_str):
     #somehow, multiprocessing does not work when continue training :(
     #TODO: fix it so that multiprocessing does work when continue training
     parallel=len(all_models) == 0
-    parallel = False
     if parallel:
         pool = mp.Pool()
 
+    def write_training_log(string):
+        with open(f'{run_folder_str}/training_log.txt', "a") as file:
+            file.write(string + '\n')
+
     iterator = range(len(all_models), args.num_training_loops)
     for i in (tqdm(iterator, desc='Training') if args.verbose else iterator):
-        current_dataloader = self_play_and_dataset(run_folder_str, model, pool if parallel else None, args)
+        start = time.time()
+        write_training_log(f'[EPOCH {i}]')
+
+        num_new_boards, current_dataloader = self_play_and_dataset(run_folder_str, model, pool if parallel else None, args)
+
+        end = time.time()
+        seconds = end - start
+        seconds_per_board = seconds / num_new_boards
+
+        write_training_log(f'Self_play boards: {num_new_boards}')
+        write_training_log(f'Self_play time: {str(datetime.timedelta(seconds=seconds))}')
+        write_training_log(f'Time per position: {str(datetime.timedelta(seconds=seconds_per_board))}')
+
+        start = time.time()
         train_evaluator(model, current_dataloader, optimizer, args)
         save_model(model, run_folder_str, i)
         loss, value_loss, policy_loss = test_model(model, current_dataloader)
-        with open(f'{run_folder_str}/losses.txt', "a") as file:
-            file.write(f'{i}\t{loss}\t{value_loss}\t{policy_loss}\n')
+        end = time.time()
+
+        write_training_log(f'loss: {loss:.6f}\tvalue_loss: {value_loss:.6f}\tpolicy_loss: {policy_loss:.6f}')
+        write_training_log(f'Training time: {end - start}\n')
 
     if parallel:
         pool.close()
@@ -287,8 +329,10 @@ def evaluate(args, run_folder_str):
         loss, value_loss, policy_loss = test_model(curr_model, current_dataloader)
         with open(f'{run_folder_str}/final_losses.txt', "a") as file:
             file.write(f'{i}\t{loss}\t{value_loss}\t{policy_loss}\n')
-        with open(f'{run_folder_str}/final_tournament.txt', "a") as file:
-            file.write(f'last vs {i}:\t{model_vs(last_model, curr_model, args, num_games=20)}\n')
+
+        if args.compute_tournament:
+            with open(f'{run_folder_str}/final_tournament.txt', "a") as file:
+                file.write(f'last vs {i}:\t{model_vs(last_model, curr_model, args, num_games=20)}\n')
 
 def main(args):
     run_folder_str = before_training(args)
@@ -330,6 +374,8 @@ if __name__ == "__main__":
 
     #Misc
     parser.add_argument('--verbose', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--compute_tournament', default=False, action=argparse.BooleanOptionalAction,
+                        help='After training, let the final model play against all other models')
 
     args = parser.parse_args()
     main(args)
