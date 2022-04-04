@@ -5,7 +5,7 @@ class ConvLayer(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(6, args.conv_filters, kernel_size=3, padding=1),
+            nn.Conv2d(5, args.conv_filters, kernel_size=3, padding=1),
             nn.BatchNorm2d(args.conv_filters),
             nn.ReLU()
         )

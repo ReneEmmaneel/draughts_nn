@@ -15,6 +15,25 @@ import platform,socket,re,uuid,json,psutil
 from self_play import play_games, GameStateDataset, model_vs
 from net import InputLayer, ValueHead, PolicyHead
 
+def flip_board(board_state, flip=True):
+    """Given a board_state, return a board_state as it is from
+    whites perspective. That is, if it is blacks turn, flip the board 180 degrees
+    and flip the white with black pieces and visa versa.
+    If flip is False, do not flip
+    """
+    if not flip:
+        return board_state
+    else:
+        board_state = torch.flip(board_state, [0,1])
+        new_board_state = torch.zeros_like(board_state)
+        new_board_state[:,:,0] = board_state[:,:,0]
+        new_board_state[:,:,1] = board_state[:,:,3]
+        new_board_state[:,:,2] = board_state[:,:,4]
+        new_board_state[:,:,3] = board_state[:,:,1]
+        new_board_state[:,:,4] = board_state[:,:,2]
+        return new_board_state
+
+
 class PositionEvaluator(nn.Module):
     def __init__(self, args):
         super().__init__()
@@ -32,17 +51,23 @@ class PositionEvaluator(nn.Module):
         W = 5
         H = 10
 
-        is_white = is_white.squeeze().repeat(H*W).reshape(-1,H,W,1)
-        board_state = torch.cat((board_state, is_white), dim=3)
+        board_state_flipped = torch.zeros_like(board_state)
+        for i in range(board_state.size()[0]):
+            board_state_flipped[i] = flip_board(board_state[i], is_white[i].item() == -1)
 
-        board_state = board_state.permute(0,3,1,2)
+        board_state_flipped = board_state_flipped.permute(0,3,1,2)
 
-        output = self.input(board_state)
+        output = self.input(board_state_flipped)
 
         if torch.isnan(output).any():
             raise ValueError("NaN value detected in PositionEvaluator")
 
         policy = self.policy_head(output).reshape(-1,H,W,H,W)
+
+        policy_flipped = torch.zeros_like(policy)
+        for i in range(policy.size()[0]):
+            policy_flipped[i] = flip_board(policy[i], is_white[i].item() == -1)
+
         value = self.value_head(output).reshape(-1)
 
         return value, policy

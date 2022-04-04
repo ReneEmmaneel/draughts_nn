@@ -303,7 +303,7 @@ def play_game_against_model(model, args):
                 position = (moves_dict[move], not position[1])
                 print_position(*position)
             else: #models turn
-                move, _, _ = self_play.MCTS(model, None, position[0], position[1], args, show_bar=True, deterministic=True)
+                move, _, _ = self_play.MCTS(model, None, position[0], position[1], args, show_bar=True, deterministic=False)
                 position = (moves_dict[move], not position[1])
                 print_position(*position)
             break
