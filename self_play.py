@@ -9,7 +9,7 @@ import utils
 from numpy.random import choice
 from torch.utils.data import Dataset, DataLoader
 from tqdm import *
-import multiprocessing as mp
+import torch.multiprocessing as mp
 
 def bool_to_tensor(bool):
     return torch.unsqueeze(torch.Tensor([int(bool)*2-1]), dim=0)

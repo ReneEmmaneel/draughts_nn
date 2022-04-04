@@ -7,7 +7,8 @@ from torch.utils.data import Dataset, DataLoader
 import datetime
 import json
 from tqdm import *
-import multiprocessing as mp
+import torch.multiprocessing as mp
+
 import time
 import platform,socket,re,uuid,json,psutil
 
@@ -50,7 +51,7 @@ class PositionEvaluator(nn.Module):
     def device(self):
         return next(self.parameters()).device
 
-def get_dataloader(run_folder, previous_states = []):
+def get_dataloader(run_folder, args, previous_states = []):
     saved_positions_folder = f'{run_folder}/saved_positions'
     #Load previous states
     if os.path.exists(saved_positions_folder):
@@ -80,7 +81,7 @@ def self_play_and_dataset(run_folder, model, pool, args):
     previous_states = all_new_states
     saved_positions_folder = f'{run_folder}/saved_positions'
 
-    dataloader = get_dataloader(run_folder, previous_states=previous_states)
+    dataloader = get_dataloader(run_folder, args, previous_states=previous_states)
 
     #Save current generated states
     amount = len(os.listdir(saved_positions_folder))
@@ -279,6 +280,10 @@ def train(args, run_folder_str):
     #TODO: fix it so that multiprocessing does work when continue training
     parallel=len(all_models) == 0
     if parallel:
+        try:
+            mp.set_start_method('spawn', force=True)
+        except RuntimeError:
+            pass
         pool = mp.Pool()
 
     def write_training_log(string):
@@ -320,7 +325,7 @@ def evaluate(args, run_folder_str):
     last_model = last_model.to(device)
     last_model.load_state_dict(torch.load(last_model_filename))
 
-    current_dataloader = get_dataloader(run_folder_str)
+    current_dataloader = get_dataloader(run_folder_str, args)
 
     for i in range(args.num_training_loops):
         filename = f'{run_folder_str}/models/iteration_{i}'
